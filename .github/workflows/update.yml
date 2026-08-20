@@ -1,4 +1,4 @@
-Name: nernur liste
+name: nernur liste
 
 on:
   workflow_dispatch:
