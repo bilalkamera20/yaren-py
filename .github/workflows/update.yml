@@ -1,1 +1,48 @@
-dene
+Name: nernur liste
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 01 * * *'   # UTC 01:30 → Türkiye saatiyle 04:30
+
+jobs:
+  update_files:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Kodu Çek
+        uses: actions/checkout@v4
+
+      - name: Python Kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Scriptiniz dış bağımlılıklar (requests, beautifulsoup4 vb.) kullanıyorsa aşağıdaki adımı aktif edin:
+      # - name: Bağımlılıkları Yükle
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Scripti Çalıştır
+        run: python balkica.py   # Script adınız .py uzantılı olarak değiştirildi
+
+      - name: Değişiklikleri Kaydet ve Yükle
+        env:
+          TZ: Europe/Istanbul
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          if [ -f nernur.txt ]; then
+            git add nernur.txt
+          fi
+
+          if git diff --cached --quiet; then
+            echo "Değişiklik yok, commit atılmadı."
+          else
+            git commit -m "Otomatik Güncelleme: $(date +'%d.%m.%Y %H:%M')"
+            git push origin main
+          fi
