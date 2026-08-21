@@ -72,8 +72,8 @@ HEADERS = {
 
 def build_body(cursor: Optional[str]) -> Dict[str, Any]:
     return {
-        "language": "de",
-        "region": "DE",
+        "language": "en",
+        "region": "ALL",
         "catalogId": "iptv",
         "id": "",
         "adult": False,
