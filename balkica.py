@@ -1,38 +1,20 @@
-# -*- coding: utf-8 -*-
-import json
 import os
 import re
+import uuid
 import time
-from typing import Any, Dict, List, Optional
-from urllib.parse import quote
-import urllib.request
-import urllib.error
+import json
+import urllib.parse
+import requests
 
-# -- Sabitler ---------------------------------------------------------------
-CATALOG_URL = "https://vavoo.to/mediahubmx-catalog.json"
-GROUP = "Turkey"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-M3U_FILE = os.path.join(SCRIPT_DIR, "nernur.txt")
-FETCH_TIMEOUT_SECONDS = 20
-MAX_RETRIES = 5
+# ============================================================
+#  SABİTLER VE PROXY TANIMLARI
+# ============================================================
+UA             = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
+CLIENT_VERSION = '3.1.4'
+CATALOG_URL    = 'https://vavoo.to/mediahubmx-catalog.json'
+OUTPUT_FILE    = 'nernur.txt'
 
-# -- Proxy Ayrıştırma Ve Temizleme Fonksiyonu ------------------------------
-def parse_proxies(env_val: Optional[str]) -> List[str]:
-    if not env_val or not env_val.strip():
-        return []
-
-    tokens = re.split(r"[\s,]+", env_val.strip())
-    proxies = []
-    for p in tokens:
-        clean_p = p.rstrip("/")
-        if clean_p.startswith("http://") or clean_p.startswith("https://"):
-            proxies.append(clean_p)
-    return proxies
-
-
-ENV_PROXIES = parse_proxies(os.getenv("PROXY_BASE"))
-
-# Yedek liste
+# Gelişmiş Yedekli Worker Proxy Havuzu
 FALLBACK_PROXIES = [
     "https://1.vavturktv.workers.dev",
     "https://2.vavturktv.workers.dev",
@@ -76,292 +58,295 @@ FALLBACK_PROXIES = [
     "https://ner.bilalkamera20.workers.dev"
 ]
 
-PROXY_LIST = ENV_PROXIES if len(ENV_PROXIES) > 0 else FALLBACK_PROXIES
-proxy_index = 0
+PING_URLS = [
+    'https://www.vypn.net/api/app/ping',
+    'https://www.vavoo.tv/api/app/ping',
+    'https://cache.vypn.net/api/app/ping',
+]
 
-HEADERS = {
-    "content-type": "application/json; charset=utf-8",
-    "accept": "*/*",
-    "accept-language": "en-US,en;q=0.9,tr;q=0.8",
-    "cache-control": "no-cache",
-    "pragma": "no-cache",
-    "origin": "https://vavoo.to",
-    "referer": "https://vavoo.to/live",
-    "dnt": "1",
-    "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"macOS"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "user-agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-    ),
-}
+DEFAULT_GROUPS = [
+    'Turkey'
+]
 
+# Ortam değişkeninden (ENV) PROXY_BASE değerini al ve ayrıştır
+def parse_env_proxies():
+    env_proxy = os.getenv('PROXY_BASE')
+    if not env_proxy:
+        return []
+    raw_list = re.split(r'[,;\r\n]+', env_proxy)
+    proxies = []
+    for item in raw_list:
+        trimmed = item.strip()
+        if trimmed:
+            proxies.append(trimmed.rstrip('/'))
+    return proxies
 
-def build_body(cursor: Optional[str]) -> Dict[str, Any]:
-    return {
-        "language": "en",
-        "region": "ALL",
-        "catalogId": "iptv",
-        "id": "",
-        "adult": False,
-        "search": "",
-        "sort": "name",
-        "filter": {"group": GROUP},
-        "cursor": cursor,
+env_proxies = parse_env_proxies()
+worker_proxies = env_proxies if env_proxies else FALLBACK_PROXIES
+
+# ============================================================
+#  HTTP POST
+# ============================================================
+def http_post(url, payload, extra_headers=None):
+    if extra_headers is None:
+        extra_headers = {}
+    
+    headers = {
+        'Content-Type': 'application/json; charset=utf-8',
+        'User-Agent': UA,
+        'Accept': '*/*',
     }
+    headers.update(extra_headers)
 
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=20, verify=False)
+        return {
+            'ok': response.status_code < 400,
+            'body': response.text,
+            'code': response.status_code,
+            'err': None
+        }
+    except Exception as e:
+        return {'ok': False, 'body': None, 'code': 0, 'err': str(e)}
 
-def fetch_page(cursor: Optional[str]) -> Dict[str, Any]:
-    body_data = json.dumps(build_body(cursor)).encode("utf-8")
-    last_err = None
+# ============================================================
+#  TOKEN (İmza Alımı)
+# ============================================================
+def get_signature():
+    uid = uuid.uuid4().hex
+    ts = round(time.time() * 1000)
+    payload = {
+        'reason': 'app-focus', 'locale': 'de', 'theme': 'dark',
+        'metadata': {
+            'device':  {'type': 'desktop', 'uniqueId': uid},
+            'os':      {'name': 'win32', 'version': 'Windows 10 Pro',
+                          'abis': ['x64'], 'host': 'PC'},
+            'app':     {'platform': 'electron'},
+            'version': {'package': 'net.vypn.app', 'binary': '3.1.0', 'js': '3.1.0'},
+        },
+        'appFocusTime': 0, 'playerActive': False, 'playDuration': 0,
+        'devMode': False, 'hasAddon': True, 'castConnected': False,
+        'package': 'net.vypn.app', 'version': '3.1.0', 'process': 'app',
+        'firstAppStart': ts, 'lastAppStart': ts, 'ipLocation': None,
+        'adblockEnabled': True,
+        'proxy': {'supported': ['ss'], 'engine': 'Mu', 'enabled': False, 'autoServer': True},
+        'iap':   {'supported': False},
+    }
+    
+    for u in PING_URLS:
+        r = http_post(u, payload)
+        if r['ok']:
+            try:
+                d = json.loads(r['body'])
+                sig = d.get('sig') or d.get('addonSig') or d.get('signature') or d.get('token')
+                if sig:
+                    return sig
+            except json.JSONDecodeError:
+                continue
+    return None
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            req = urllib.request.Request(
-                CATALOG_URL, data=body_data, headers=HEADERS, method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_SECONDS) as res:
-                if res.status != 200:
-                    raise Exception(f"HTTP {res.status}")
-
-                raw_response = res.read().decode("utf-8")
-                data = json.loads(raw_response)
-
-                if isinstance(data, dict) and data.get("error"):
-                    raise Exception(f"Vavoo hatası: {data['error']}")
-
-                return data
-        except Exception as err:
-            last_err = err
-            wait = attempt
-            print(
-                f"Deneme {attempt}/{MAX_RETRIES} başarısız ({err}). {wait}sn sonra tekrar deneniyor..."
-            )
-            time.sleep(wait)
-
-    raise last_err if last_err else Exception("Bilinmeyen istek hatası.")
-
-
-def fetch_all() -> List[Dict[str, Any]]:
-    items = []
-    cursor = None
-    page = 0
-    MAX_PAGES = 200
-
-    while True:
-        page += 1
-        data = fetch_page(cursor)
-
-        page_items = data.get("items") if isinstance(data, dict) else None
-        if isinstance(page_items, list) and len(page_items) > 0:
-            items.extend(page_items)
-
-        print(
-            f"Sayfa {page}: {len(page_items) if page_items else 0} kanal çekildi, "
-            f"nextCursor={data.get('nextCursor') if isinstance(data, dict) else 'null'}"
-        )
-
-        cursor = data.get("nextCursor") if isinstance(data, dict) else None
-
-        if page >= MAX_PAGES:
-            print(f"Maksimum sayfa sınırına ulaşıldı ({MAX_PAGES}).")
-            break
-
-        if not cursor:
-            break
-
-    return items
-
-
-# -- Temizleme ve Kategorizasyon Yardımcıları --------------------------------
-
-def clean_channel_name(name: Optional[str]) -> str:
+# ============================================================
+#  TEMİZLEME VE KATEGORİZASYON FONKSİYONLARI
+# ============================================================
+def clean_channel_name(name):
     if not name:
         return "Bilinmeyen Kanal"
 
     s = str(name)
-    # 1. Baştaki "4K TR:", "TR:", "4K TR :" gibi ifadeleri kaldırır
-    s = re.sub(r"^\s*(?:4K\s*)?TR\s*:\s*", "", s, flags=re.IGNORECASE)
-    # 2. Sondaki veya kelime aralarındaki .b, .c, .s gibi nokta uzantılarını kaldırır
-    s = re.sub(r"\s*\.[bcs]\b", "", s, flags=re.IGNORECASE)
-    # 3. Çözünürlük ve yayın kalitesi etiketlerini temizler
-    s = re.sub(r"\s+(?:4K|UHD|FHD|HD\+|HD|SD|HEVC|RAW|H265|H\.265|FEED)(?=\s|$)", "", s, flags=re.IGNORECASE)
-    # 4. Fazla boşlukları temizler
-    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r'^\s*(?:4K\s*)?TR\s*:\s*', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*\.[bcs]\b', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+(?:4K|UHD|FHD|HD\+|HD|SD|HEVC|RAW|H265|H\.265|FEED)(?=\s|$)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'S\s*[\x00-\x1F\x7F-\xFF\?\s]*NEMA', 'SINEMA', s, flags=re.IGNORECASE)
+    s = re.sub(r'DREAM\s*T\s*R\s*K', 'DREAM TURK', s, flags=re.IGNORECASE)
+    s = re.sub(r'MINICA', 'MINIKA', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+', ' ', s)
 
     return s.strip()
 
-
-def normalize_for_category(name: Optional[str]) -> str:
+def normalize_for_category(name):
     s = clean_channel_name(name)
 
-    replacements = [
-        (r"\bT RK\b", "TURK"),
-        (r"\bT RKIYEM\b", "TURKIYEM"),
-        (r"\bBENG\b", "BENGU"),
-        (r"\bBENGT\b", "BENGUT"),
-        (r"\bAK T\b", "AKIT"),
-        (r"\bS NEMA\b", "SINEMA"),
-        (r"\bM N KA\b", "MINIKA"),
-        (r"\bOCUK\b", "COCUK"),
-        (r"\bM Z K\b", "MUZIK"),
-        (r"\bS ZC\b", "SOZCU"),
-        (r"\bSZC\b", "SOZCU"),
-        (r"\bLKE\b", "ULKE"),
-        (r"\bYE IL AM\b", "YESILCAM"),
-        (r"\bYE IL[ ]?CAM\b", "YESILCAM"),
-        (r"\bT[ÜU]RK\b", "TURK"),
+    char_map = {
+        'Ç': 'C', 'ç': 'c',
+        'Ğ': 'G', 'ğ': 'g',
+        'İ': 'I', 'I': 'I', 'ı': 'i',
+        'Ö': 'O', 'ö': 'o',
+        'Ş': 'S', 'ş': 's',
+        'Ü': 'U', 'ü': 'u'
+    }
+    for k, v in char_map.items():
+        s = s.replace(k, v)
+
+    search_patterns = [
+        r'\bT RK\b', r'\bT RKIYEM\b', r'\bBENG\b', r'\bBENGT\b', r'\bAK T\b', 
+        r'\bS\s*NEMA\b', r'\bM N KA\b', r'\bOCUK\b', r'\bM Z K\b', r'\bS ZC\b', 
+        r'\bSZC\b', r'\bLKE\b', r'\bYE IL AM\b', r'\bYE IL[ ]?CAM\b', r'\bT[ÜU]RK\b'
+    ]
+    replace_values = [
+        'TURK', 'TURKIYEM', 'BENGU', 'BENGUT', 'AKIT', 'SINEMA', 'MINIKA', 
+        'COCUK', 'MUZIK', 'SOZCU', 'SOZCU', 'ULKE', 'YESILCAM', 'YESILCAM', 'TURK'
     ]
 
-    for pattern, repl in replacements:
-        s = re.sub(pattern, repl, s, flags=re.IGNORECASE)
+    for pat, rep in zip(search_patterns, replace_values):
+        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
 
     return s
 
-
-CATEGORY_RULES = [
-    ('TR Radyo', r'\b(RADIO|RADYO)\b|\b(FM|MBAT FM|EFKAR FM|FMTV|F ?M)\b(?!\s*TV)|POWERTURK|POWER FM|SHOW RADYO|ALEM (?:FM|RADYO)|BABA RADYO|KRAL POP RADYO|PAL STATION|X NOSTALJI|RADIO ROCK|STANBUL FM'),
-    ('TR Çocuk', r'CARTOON|BOOMERANG|DISNEY|NICK(?:ELODEON|TOONS|JR|JUNIOR|\b)|BABY ?TV|BABYTV|M[İI]?N ?KA|MINIKA|POKEMON|POKÉMON|ANIMATION|ANIMASYON|TRT ?[ÇC]?OCUK|OCUK HD|\bCOCUK\b|\b[ÇC]OCUK\b|BEN ?10|ANGRY BIRDS|CAILLOU|PEPPA|PEPE|HEIDI|SIRINLER|TOM & JERRY|S[ÜU]NGER|SPIDERMAN|BARBIE|PIJAMA|PIRIL|RAFADAN|KELOGLAN|KUKULI|KUKILI|KOSTEBEK|CHICKY|BOOBA|WAKFU|GABBY|TAYO|NILOYA|PISI|LEYLEK|MASAL|CANIM KARDESIM|ADIBESA|MOMO|ALVIN|VIKINGLER|TRANSFORMERS|TROL AVCILARI|SMART COCUK|ILAHI COCUK|CILGIN ORMAN|KRAL SAKIR|SERCE KUS|ITFAYECI SAM|MUFFETIS|MAYMUNLAR|ELIF VE|ELIFIN|MIMOCAN|HAPSUU|RUYA TRENI|MASA KOCAAYI|PAK PIRPIR|LIMON ZEYTIN|GONCA TV|NASREDDIN|SEKER HOCA|SEVIMLI DOSTLAR|PAW PETROL|OSCAR COLLERDE|SL NILOYA|CBEEBIES|DUCK TV|JIM ?JAM|ENGLISH CLUB TV|EBA TV|TAV[SŞ]AN|PATRON BEBEK|D[İI]YARI|BAHA\b|SEF ROKKA|BULMACA KULESI|AKILLI TAV[SŞ]AN|AKLILI|CANIM KARDESIM|DA VINC KIDS|DA VINCI KIDS|DINAMIK ANIMASYON|DREAM ANIMASYON|MAX ANIMASYON|ENO ANIMASYON|BEST ANIMASYON|YILDIZ KIZ|KONU[SŞ]AN TOM|JURASSIC WORLD|MONTAG'),
-    ('TR Belgesel', r'DISCOVERY|NATIONAL GEOGRAPHIC|NAT ?GEO|\bHISTORY\b|ANIMAL PLANET|DA VINCI(?! KIDS)|VIASAT|BBC EARTH|LOVE NATURE|TRT BELGESEL|EPIC DRAMA|TARIH TV|TARIM TV|TGRT BELGESEL|INVESTIGATION|DMAX|DOCUBOX|DOCU SCREEN|SCIENCE|\bIZ TV\b|YABAN|OUTDOOR|CHASSE|ANIMAUX|AGRO TV|CIFTCI TV|REDBULL TV|\bTLC\b'),
-    ('TR Spor', r'BEIN SPO[RT]{0,3}S?(?!\s*HABER)|\bBEIN 1\b|S[- ]?SPORTS?|\bS SPORT\b|SPOR SMART|EUROSPORT|\bNBA\b|TJK TV|TIVIBU ?SPOR|TIVIBUSPOR|TRT SPOR|TABII SPOR|EXXEN SPO[RT]?|\bHT SPOR\b|EKOL SPOR|SPORTS TV|IDMAN TV|GALATASARAY TV|\bFB TV\b|\bGS TV\b|SARAN SPORT|SMART SPOR|\bSPOR\b|\bSPORT\b'),
-    ('TR Film', r'SINEMA|S[İI]NEMA|S NEMA|CINEMA|SINEMAX|SINEVIZYON|\bMOVIES?\b|MOVIEMAX|MOVIESMART|BEIN MOVIES|BEIN BOX|BOX OFFICE|\bFX\b|FX HD|YESILCAM|YE ?I ?L ?[ÇC] ?AM|YE ?I ?L ?AM|YEŞ?[İI]LC?AM|GLOBAL BOX|PROTURK|FIX CINEMA|KINGBOX|ARENA BOX|SHOWMAX|SHOW MAX|REAL BOX|SMART BOX|BEST (?:AKSIYON|BILIMKURGU|DRAM|HABABAM|IMBD|KOMEDI|KORKU|LOCA|NETFLIX|SALON|SAVAS|TURK|WESTERN|YESILCAM)|MAX (?:007|AKSIYON|GOLD|ORJINAL|PREMIER|STAR WARS|TURK|VIZYON|WESTERN)|DINAMIK (?:AKSIYON|BILIMKURGU|DRAM|IMBD|KOMEDI|KORKU|TURK|VIZYON|WESTERN|YESILCAM)|DREAM (?:AKSIYON|BEIN OFFICE|BOX|DRAM|KEMAL|KOMEDI|KORKU|LOCA|NETFLIX|SAVAS|WESTERN)|ULTRA (?:AKSIYON|BILIMKURGU|IMBD|KEMAL|KOMEDI|KORKU|TURK)|ENO (?:AKSIYON|VIZYON|WESTERN)|\bLOCA\b|\bSALON\b|\bVIZYON\b|AKSIYON|AKS[İIY]?YON|AKS YON|KOMED[İI]|\bKORKU\b|\bDRAM\b|WESTERN|BILIM ?KURGU|\bSAVAS\b|\bIMBD\b|\bIMDB\b|\bFILM\b|FILMBOX|HORROR|OSCAR|KEMAL SUNAL|\b007\b|\bCINE ?1\b|SIFIR TV|SON C BOOM|\bYERL[İI]\b|SPIDERMAN(?! TV)|ARENA BOX|MOVIE SMART|\bM ?T[UÜ]RK TV\b|\bM TURK TV\b|\bM T RK TV\b'),
-    ('TR Dizi', r'SER[İI]ES|\bDIZI\b|BEIN SERIES|D[İI]Z[İI] ?SMART|DIZISMART'),
-    ('TR Müzik', r'POWER T[UÜ]RK|POWER ?TV|POWERTURK|POWER (?:DANCE|LOVE|HD)|\bPOWER\b|KRAL POP|KRAL ?TV|\bKRAL\b|TRT M[UÜ]?Z[İI]?K|TRT MUZIK|NR ?1|NUMBER ?1|NUMBER ONE|DAMAR|ARABESK|AKUS ?T[İI]K|AHMET KAYA|IBRAHIM ERKAL|IBRAHIM TATLISES|\bTATLISES\b|ZERRIN OZER|SEZEN AKSU|TARKAN|SELDA BAGCAN|CENGIZ KURTOGLU|MAHSUN KIRMIZIGUL|MUSLUM GURSES|YILDIZ TILBE|FERDI TAYFUR|DURSUN AL|MTV LIVE|VINTAGE MUSIC|RETRO T ?RK|RETRO TURK|T[UÜ]?RK ?E POP|T RK E POP|T RK E KLASIK|SLOW KARADENIZ|\bSLOW\b|\bZARA\b|\bSONER ARICA\b|M[UÜ]Z[İI]K|\bFM TV\b|\bFMTV\b|REDBOX'),
-    ('TR Haber', r'\bHABER\b|\bNEWS\b|BLOOMBERG|\bCNN\b|EKOTURK|\bEKO ?T[UÜ]RK\b|\bEKOL\b|A ?PARA|APARA|PARANIN|HALK TV|TELE ?1|SOZCU|S ZC|\bSZC\b|BENGU ?T[UÜ]RK|BENGUTURK|TRT WORLD|\bDHA\b|LIDER HABER|FLASH HABER|MEDYA HABER|GLOBAL HABER|TRABZON HABER|BEIN SPORTS HABER|T[UÜ]RKHABER|HABERT[UÜ]RK|HABERT RK|\bARTI TV\b'),
-    ('TR Dini', r'D[İI]YANET|\bAK[İIY]?T\b|MEHTAP|H[İI]LAL|KUDUS|KUDÜS|KUD S|SEMERKAND|LALEGUL|LÂLEGÜL|L[AÂ]LEG[UÜ]L|MERCAN TV|VUSLAT|KARDELEN|DIYAR TV|\bDOST TV\b|\bYOL TV\b|\bKANAL 7\b|HAYAT|HAYIRLI|HZ MERYEM|HZ OMER|HZ YUSUF|MAM EBU|ASHABI KEHF|HASAN VE HUSEYIN|SAT ?7 T[UÜ]RK|TVNET|TRT DIYANET|\bTV ?5\b|\bTV5\b|REHBER|ILAHI|ILKE TV|MESAJ TV|SURELER|T[UÜ]RK ?E MEAL|DURSUN AL ERZINCANLI|YUNUS EMRE|CEM TV|BARBAROS TV|ASLAN TV|TYT TURK|SATRAN[ÇC]|FASIL'),
-    ('TR Yaşam', r'24 KITCHEN|GURME|BEIN GURME|LIFESTYLE|\bLIFE TV\b|FASHION|WM TV|EGE ILE GAGA|24 RAW|\bTVEM\b|\bTV EM\b|AUTOMOTO|LINE TV|BILGILENDIRME|WOMAN|TELEGRAM'),
-    ('TR Ulusal', r'^24$|\bTRT\b|\bTRT 1\b|\bTRT ?2\b|TRT2|\bTRT 3\b|TRT AVAZ|TRT T[UÜ]RK|TRT TURK|TRT KURD[İI]?|TRT WORLD|TRT 4K|TRT EBA|\bKANAL D\b|\bATV\b|ATV AVRUPA|ATV EUROPA|STAR TV|\bSTAR\b|STAR HD|SHOW TV|SHOW T[UÜ]RK|\bSHOW\b|\bFOX\b|NOW ?TV|\bNOW\b|TV ?8|TV8[.,]5|BEYAZ TV|BEYAZ HD|\bBEYAZ\b|\b360\b|24 TV|\bA2\b|A HABER|A NEWS|A PARA|A SPOR|TV ?100|TV ?4|FLASH TV|TEVE ?2|TEVE2|CNN T[UÜ]RK|CNN TURK|\bKRT\b|ULUSAL KANAL|DREAM T[UÜ]RK|DREAM TURK|\bDREAM TV\b|\bBRT ?[0-9]+\b|\bBRTV\b|EURO ?D|EURO ?STAR|\bNTV\b|EXXEN TV|TIVI ?T[UÜ]RK|TABII|OLAY T[UÜ]RK|OLAY TURK|24 HD|24 HABER|24 KITCHEN|LKE ?TV|[UÜ]LKE ?TV|ULKE ?TV|ULKETV|TV DEN|TVDEN|KANAL AVRUPA|KANAL 7 (?:AVRUPA|EUROPA)|LKE TV|EURO D|EURO STAR|SHOW TV EUROPA|BENGU ?T[UÜ]RK|BENGU TURK|BENGUTURK|TGRT EU|D ?[ĞG] ?N TV|\bTBMM\b|TV NET|\bTV 1\b|TVO TV|BEIN IZ|\bMAX\b'),
-    ('TR Yerel', r'ADANA|AD[İI]YAMAN|AFYON|AKSARAY|ALANYA|ANAKKALE|\bANKARA\b|ANKA TV|ANKARA T[UÜ]RKIYEM|ANLIURFA|ANTALYA|\bBURSA\b|ELAZIG|ERCIS|ERZURUM|ESK[İI]SEHIR|ESK EH R|\bES TV\b|\bER TV\b|ETV KAYSERI|ETV MANISA|GAZIANTEP|\bICEL\b|K[İI]MARAS|KAHRAMANMARA|K MARAS|KAYSERI|KOCAELI|KON TV|KONYA|MALATYA|MERSIN|ORDU|ALTAS TV|SIVAS|TRABZON|TUNCELI|DERSIM|\bURFA\b|IZMIR TV|TON TV|KIBRIS|EDIRNE|DENIZLI|\bKAY TV\b|KENT T[UÜ]RK|KENT T RK|HUNAT|\bOBB\b|KANAL 12|KANAL 15|KANAL 23|KANAL 24|KANAL 26|KANAL 3\b|KANAL 32|KANAL 33|KANAL 34|KANAL 360|KANAL 42|KANAL 58|KANAL 68|KANAL FIRAT|KANAL URFA|KANAL V\b|\bKANAL Z\b|KANAL T\b|KANAL HAYAT|KANAL 68|KARADENIZ|GUNEYDOGU|GÜNEYDOĞU|\bEGE\b|MELTEM|CAY TV|TEK RUMEL|YENI KOCAELI|OLAY TV|\bGRT\b|SUN RTV|SUN TV|\bK[ÖO]Y TV\b|IZMIR|TIVI 6|TV 41|TV 42|TV 52|TV 264|KOZA TV|MC EU|MERCAN|KADIRGA|\bFANATIK\b|AS TV|ISVI|GURBET24|T\.A\.Y|TAY TV|\bTAY\b|\bTMB\b|AV TV|MAVI KARADENIZ|EGE ILE GAGA|GAZIANTEP GRT|VIYANA TV|LUYS|EDESSA|BIR TV|ANA[DK]OLU|B[İI]R TV|D[İI]YAR|ERTV|HRT|SIVAS|VIZYON 58|ADA TV|CAN TV|DEHA|SIFIR|EKIN T[UÜ]RK|AFROTURK|ARAS|ARKADAG|VATAN|D[ÖO]RU|AKSU TV|KARE TV|ON 4|ON 6|PAMUKKALE|UCANKUS|64 KARE|DENIZ POSTASI')
-]
-
-# Regex desenlerini derleme
-COMPILED_RULES = [(cat, re.compile(pattern, re.IGNORECASE)) for cat, pattern in CATEGORY_RULES]
-
-def categorize(name: str) -> str:
+def categorize_channel(name):
     s = normalize_for_category(name)
-    for cat, pattern in COMPILED_RULES:
-        if pattern.search(s):
+
+    if re.search(r'KARADENIZ\s*BRT|TRT\s*MUZIK', s, re.IGNORECASE):
+        return 'TR Diğer'
+
+    rules = {
+        'TR Spor': r'BEIN SPO[RT]{0,3}S?|\bBEIN 1\b|S[- ]?SPORTS?|\bS SPORT\b|SPOR SMART|EUROSPORT|\bNBA\b|TJK TV|TIVIBU ?SPOR|TIVIBUSPOR|TRT SPOR|TABII SPOR|EXXEN SPO[RT]?|\bHT SPOR\b|EKOL SPOR|SPORTS TV|IDMAN TV|GALATASARAY TV|\bFB TV\b|\bGS TV\b|SARAN SPORT|SMART SPOR|\bSPOR\b|\bSPORT\b',
+        'TR Radyo': r'\b(RADIO|RADYO)\b|\b(FM|MBAT FM|EFKAR FM|FMTV|F ?M)\b(?!\s*TV)|POWERTURK|POWER FM|SHOW RADYO|ALEM (?:FM|RADYO)|BABA RADYO|KRAL POP RADYO|PAL STATION|X NOSTALJI|RADIO ROCK|STANBUL FM',
+        'TR Çocuk': r'CARTOON|BOOMERANG|DISNEY|NICK(?:ELODEON|TOONS|JR|JUNIOR|\b)|BABY ?TV|BABYTV|MINIKA|MINICA|POKEMON|ANIMATION|ANIMASYON|TRT ?COCUK|COCUK HD|\bCOCUK\b|ANKA|BEN ?10|ANGRY BIRDS|CAILLOU|PEPPA|PEPE|HEIDI|SIRINLER|TOM & JERRY|SUNGER|SUNGER\s*BOB|SPIDERMAN|BARBIE|PIJAMA|PIRIL|RAFADAN|KELOGLAN|KUKULI|KUKILI|KOSTEBEK|CHICKY|BOOBA|WAKFU|GABBY|TAYO|NILOYA|PISI|LEYLEK|MASAL|CANIM KARDESIM|ADIBESA|MOMO|ALVIN|VIKINGLER|TRANSFORMERS|TROL AVCILARI|SMART\s*COCUK|COCUK\s*SMART|ILAHI COCUK|CILGIN ORMAN|KRAL SAKIR|SERCE KUS|ITFAYECI SAM|MUFFETIS|MAYMUNLAR|ELIF VE|ELIFIN|MIMOCAN|HAPSUU|RUYA TRENI|MASA KOCAAYI|PAK PIRPIR|LIMON ZEYTIN|GONCA TV|NASREDDIN|SEKER HOCA|SEVIMLI DOSTLAR|PAW PETROL|OSCAR COLLERDE|SL NILOYA|CBEEBIES|DUCK TV|JIM ?JAM|ENGLISH CLUB TV|EBA TV|TAVSAN|PATRON BEBEK|DIYARI|BAHA\b|SEF ROKKA|BULMACA KULESI|AKILLI TAVSAN|AKLILI|DA VINC KIDS|DA VINCI KIDS|DINAMIK ANIMASYON|BEST ANIMASYON|YILDIZ KIZ|KONUSAN TOM|JURASSIC WORLD|MONTAG|64\s*KARE',
+        'TR Belgesel': r'DISCOVERY|NATIONAL GEOGRAPHIC|NAT ?GEO|\bHISTORY\b|ANIMAL PLANET|DA VINCI(?! KIDS)|VIASAT|BBC EARTH|LOVE NATURE|TRT BELGESEL|EPIC DRAMA|TARIH TV|TARIM TV|TGRT BELGESEL|INVESTIGATION|DMAX|DOCUBOX|DOCU SCREEN|SCIENCE|\bIZ TV\b|YABAN|OUTDOOR|CHASSE|ANIMAUX|AGRO TV|CIFTCI TV|REDBULL TV|\bTLC\b',
+        'TR Yaşam': r'24 KITCHEN|GURME|BEIN GURME|LIFESTYLE|\bLIFE TV\b|FASHION|WM TV|EGE ILE GAGA|24 RAW|\bTVEM\b|\bTV EM\b|AUTOMOTO|LINE TV|BILGILENDIRME|WOMAN|TELEGRAM',
+        'TR Haber': r'\b24\s*TV\b|\bTV\s*24\b|\b24\s*HABER\b|^24$|\bHABER\b|\bNEWS\b|BLOOMBERG|\bCNN\b|EKOTURK|\bEKO ?TURK\b|\bEKOL\b|A ?PARA|APARA|PARANIN|HALK TV|TELE ?1|SOZCU|\bSZC\b|BENGU|BENGUTURK|TRT WORLD|TRT HABER|\bDHA\b|LIDER HABER|FLASH|FLASH HABER|MEDYA HABER|GLOBAL HABER|TRABZON HABER|BEIN SPORTS HABER|TURKHABER|HABERTURK|\bARTI TV\b|\bAKIT\b|TVNET|TV NET|MELTEM|A HABER|ULKE|A NEWS|KRT|ULUSAL',
+        'TR Film': r'DREAM|DINAMIK\s*TURK|SINEMA|CINEMA|SINEMAX|SINEVIZYON|\bMOVIES?\b|MOVIEMAX|MOVIESMART|BEIN MOVIES|BEIN BOX|BOX OFFICE|\bFX\b|FX HD|YESILCAM|GLOBAL BOX|PROTURK|FIX CINEMA|KINGBOX|ARENA BOX|SHOWMAX|SHOW MAX|REAL BOX|SMART BOX|BEST (?:AKSIYON|BILIMKURGU|DRAM|HABABAM|IMBD|KOMEDI|KORKU|LOCA|NETFLIX|SALON|SAVAS|TURK|WESTERN|YESILCAM)|MAX|\bLOCA\b|\bSALON\b|\bVIZYON\b|AKSIYON|KOMEDI|\bKORKU\b|\bDRAM\b|WESTERN|BILIM ?KURGU|\bSAVAS\b|\bIMBD\b|\bIMDB\b|\bFILM\b|FILMBOX|HORROR|OSCAR|KEMAL SUNAL|\b007\b|\bCINE ?1\b|SIFIR TV|SON C BOOM|\bYERLI\b|SPIDERMAN(?! TV)|ARENA BOX|MOVIE SMART|\bMTURK TV\b',
+        'TR Ulusal': r'\bTRT\b|\bTRT 1\b|\bTRT ?2\b|TRT2|\bTRT 3\b|TRT AVAZ|TRT TURK|TRT KURDI|TRT 4K|TRT EBA|\bKANAL D\b|\bATV\b|ATV AVRUPA|ATV EUROPA|STAR TV|\bSTAR\b|STAR HD|SHOW TV|SHOW TURK|\bSHOW\b|\bFOX\b|NOW ?TV|\bNOW\b|TV ?8|TV8[.,]5|BEYAZ TV|BEYAZ HD|\bBEYAZ\b|\b360\b|\bA2\b|TV ?100|TV ?4|TEVE ?2|TEVE2|CNN TURK|\bBRT ?[0-9]|\bBRTV\b|EURO ?D|EURO ?STAR|\bNTV\b|EXXEN TV|TIVITURK|TABII|OLAY TURK|KANAL AVRUPA|\bKANAL 7\b|KANAL 7 (?:AVRUPA|EUROPA)|EURO D|EURO STAR|SHOW TV EUROPA|TGRT EU|DUGUN TV|\bTBMM\b|\bTV 1\b|TVO TV|BEIN IZ',
+        'TR Dizi': r'SERIES|\bDIZI\b|BEIN SERIES|DIZISMART',
+        'TR Müzik': r'POWER TURK|POWER ?TV|POWERTURK|POWER (?:DANCE|LOVE|HD)|\bPOWER\b|KRAL POP|KRAL ?TV|\bKRAL\b|NR ?1|NUMBER ?1|NUMBER ONE|DAMAR|ARABESK|AKUSTIK|AHMET KAYA|IBRAHIM ERKAL|IBRAHIM TATLISES|\bTATLISES\b|ZERRIN OZER|SEZEN AKSU|TARKAN|SELDA BAGCAN|CENGIZ KURTOGLU|MAHSUN KIRMIZIGUL|MUSLUM GURSES|YILDIZ TILBE|FERDI TAYFUR|DURSUN AL|MTV LIVE|VINTAGE MUSIC|RETRO TURK|TURKCE POP|TURKCE KLASIK|SLOW KARADENIZ|\bSLOW\b|\bZARA\b|\bSONER ARICA\b|MUZIK|\bFM TV\b|\bFMTV\b|REDBOX',
+        'TR Dini': r'DIYANET|MEHTAP|HILAL|KUDUS|SEMERKAND|LALEGUL|MERCAN TV|VUSLAT|KARDELEN|DIYAR TV|\bDOST TV\b|\bYOL TV\b|HAYAT|HAYIRLI|HZ MERYEM|HZ OMER|HZ YUSUF|MAM EBU|ASHABI KEHF|HASAN VE HUSEYIN|SAT ?7 TURK|TRT DIYANET|\bTV ?5\b|\bTV5\b|REHBER|ILAHI|ILKE TV|MESAJ TV|SURELER|TURKCE MEAL|DURSUN AL ERZINCANLI|YUNUS EMRE|CEM TV|BARBAROS TV|ASLAN TV|TYT TURK|SATRANC|FASIL',
+        'TR Yerel': r'TVDEN|TV DEN|ADANA|ADIYAMAN|AFYON|AKSARAY|ALANYA|ANAKKALE|\bANKARA\b|ANKA TV|ANKARA TURKIYEM|SANLIURFA|ANTALYA|\bBURSA\b|ELAZIG|ERCIS|ERZURUM|ESKISEHIR|\bES TV\b|\bER TV\b|ETV KAYSERI|ETV MANISA|GAZIANTEP|\bICEL\b|KAHRAMANMARAS|KAYSERI|KOCAELI|KON TV|KONYA|MALATYA|MERSIN|ORDU|ALTAS TV|SIVAS|TRABZON|TUNCELI|DERSIM|\bURFA\b|IZMIR TV|TON TV|KIBRIS|EDIRNE|DENIZLI|\bKAY TV\b|KENT TURK|HUNAT|\bOBB\b|KANAL 12|KANAL 15|KANAL 23|KANAL 24|KANAL 26|KANAL 3\b|KANAL 32|KANAL 33|KANAL 34|KANAL 360|KANAL 42|KANAL 58|KANAL 68|KANAL FIRAT|KANAL URFA|KANAL V\b|\bKANAL Z\b|KANAL T\b|KANAL HAYAT|GUNEYDOGU|\bEGE\b|TEK RUMELI|YENI KOCAELI|OLAY TV|\bGRT\b|SUN RTV|SUN TV|\bKOY TV\b|IZMIR|TIVI 6|TV 41|TV 42|TV 52|TV 264|KOZA TV|MC EU|MERCAN|KADIRGA|\bFANATIK\b|AS TV|ISVI|GURBET24|T\.A\.Y|TAY TV|\bTAY\b|\bTMB\b|AV TV|MAVI KARADENIZ|EGE ILE GAGA|GAZIANTEP GRT|VIYANA TV|LUYS|EDESSA|BIR TV|ANADOLU|DIYAR|ERTV|HRT|VIZYON 58|ADA TV|CAN TV|DEHA|SIFIR|EKIN TURK|AFROTURK|ARAS|ARKADAG|VATAN|DORU|AKSU TV|KARE TV|ON 4|ON 6|PAMUKKALE|UCANKUS|DENIZ POSTASI'
+    }
+
+    for cat, pattern in rules.items():
+        if re.search(pattern, s, flags=re.IGNORECASE):
             return cat
-    return "TR Diğer"
 
+    return 'TR Diğer'
 
-# -- M3U Dosyası Oluşturma ------------------------------------------------
+# ============================================================
+#  KATALOG ÇEKME
+# ============================================================
+def fetch_catalog_group(group, signature):
+    channels = []
+    cursor = 0
+    for _ in range(15):
+        payload = {
+            'language': 'tr', 'region': 'TR', 'catalogId': 'iptv', 'id': 'iptv',
+            'adult': False, 'search': '', 'sort': 'name',
+            'filter': {'group': group},
+            'cursor': cursor, 'clientVersion': CLIENT_VERSION,
+        }
+        r = http_post(CATALOG_URL, payload, {'mediahubmx-signature': signature})
+        if not r['ok']:
+            break
+        
+        try:
+            data = json.loads(r['body'])
+        except json.JSONDecodeError:
+            break
+            
+        if not isinstance(data, dict):
+            break
+            
+        items = data.get('items', [])
+        if not items:
+            break
 
-def escape_attr(value: Optional[str]) -> str:
-    s = str(value or "")
-    s = re.sub(r"[\r\n]+", " ", s)
-    return s.replace('"', "'")
+        for itm in items:
+            raw_name = itm.get('name', '')
+            name = clean_channel_name(raw_name)
+            if not name:
+                name = 'Isimsiz Kanal'
 
+            resolved_group = categorize_channel(raw_name)
 
-def to_stream_url(item: Dict[str, Any]) -> str:
-    global proxy_index
-    url = item.get("url", "")
-    if not url:
-        return ""
+            chid = ''
+            ids = itm.get('ids')
+            if isinstance(ids, dict):
+                chid = ids.get('id', '')
+            if not chid:
+                chid = itm.get('id', '')
 
-    num_proxies = len(PROXY_LIST)
-    if num_proxies > 0:
-        current_proxy = PROXY_LIST[proxy_index % num_proxies]
-        proxy_index = (proxy_index + 1) % num_proxies
-        return f"{current_proxy}/?url={quote(url, safe='')}&master&transport=http&.m3u8"
+            url = itm.get('url') or itm.get('play', '')
+            if not url and chid:
+                url = f"https://vavoo.to/vavoo-iptv/play/{chid}"
+            elif url and '/play/' in url and '/vavoo-iptv/' not in url:
+                url = re.sub(r'^https?://[^/]+/play/', 'https://vavoo.to/vavoo-iptv/play/', url)
+            
+            if not url:
+                continue
 
-    return url
+            logo = ''
+            images = itm.get('images')
+            if isinstance(images, dict):
+                logo = images.get('logo') or images.get('poster', '')
+            if not logo:
+                logo = itm.get('logo') or itm.get('poster', '')
 
+            tvg = ''
+            if isinstance(ids, dict):
+                tvg = ids.get('tvg', '')
 
-def deduplicate_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen = set()
-    filtered = []
-    for item in items:
-        if not item or not item.get("url"):
-            continue
+            channels.append({
+                'name':   name, 
+                'url':    url, 
+                'group':  resolved_group,
+                'logo':   logo, 
+                'tvg_id': tvg,
+            })
+            
+        cursor = data.get('nextCursor', 0)
+        if not cursor:
+            break
+            
+    return channels
 
-        v_id = item.get("ids", {}).get("id") if isinstance(item.get("ids"), dict) else None
-        key = f"{v_id}-{item['url']}" if v_id else item["url"]
+# ============================================================
+#  M3U ÜRETİMİ
+# ============================================================
+def build_m3u(channels, proxies):
+    out = ["#EXTM3U"]
+    out.append(f"#EXT-X-USER-AGENT:{UA}")
+    out.append("#EXT-X-REFERER:https://vavoo.to/")
+    out.append("#EXT-X-ORIGIN:https://vavoo.to")
 
-        if key in seen:
-            continue
+    proxy_count = len(proxies)
+    proxy_index = 0
 
-        seen.add(key)
-        filtered.append(item)
-    return filtered
+    for ch in channels:
+        logo = f' tvg-logo="{ch["logo"]}"' if ch['logo'] else ''
+        tvg  = f' tvg-id="{ch["tvg_id"]}"' if ch['tvg_id'] else ''
+        
+        out.append(f'#EXTINF:-1{tvg} tvg-name="{ch["name"]}"{logo} group-title="{ch["group"]}",{ch["name"]}')
+        
+        active_proxy = proxies[proxy_index % proxy_count]
+        proxy_index += 1
 
+        out.append(f"{active_proxy.rstrip('/')}/?url={urllib.parse.quote(ch['url'])}&master&transport=http&.m3u8")
+        
+    return "\n".join(out) + "\n"
 
-def to_m3u(items: List[Dict[str, Any]]) -> str:
-    lines = ["#EXTM3U"]
-    for it in items:
-        vavoo_id = (
-            it.get("ids", {}).get("id", "")
-            if isinstance(it.get("ids"), dict)
-            else ""
-        )
-        raw_name = it.get("name")
-        clean_name = clean_channel_name(raw_name)
-        if not clean_name:
-            continue
+# ============================================================
+#  ANA İŞLEM
+# ============================================================
+if __name__ == '__main__':
+    # Uyarı mesajlarını bastırmak için (requests SSL uyarısı)
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        logo = it.get("logo", "")
-        raw_group = it.get("group", "")
+    sig = get_signature()
+    if not sig:
+        print("Hata: İmza alınamadı!")
+        exit(1)
 
-        # Grup kontrolü: "Turkey" veya boşsa kategorize et
-        if not raw_group or raw_group.lower() == "turkey":
-            group = categorize(clean_name)
-        else:
-            group = raw_group
+    all_channels = []
+    for g in DEFAULT_GROUPS:
+        all_channels.extend(fetch_catalog_group(g, sig))
 
-        stream_url = to_stream_url(it)
+    if not all_channels:
+        print("Hata: Kanal bulunamadı!")
+        exit(1)
 
-        lines.append(
-            f'#EXTINF:-1 tvg-id="{escape_attr(vavoo_id)}" '
-            f'tvg-name="{escape_attr(clean_name)}" '
-            f'tvg-logo="{escape_attr(logo)}" '
-            f'group-title="{escape_attr(group)}",{clean_name}'
-        )
-        lines.append(stream_url)
+    m3u_content = build_m3u(all_channels, worker_proxies)
 
-    lines.append("")
-    return "\n".join(lines)
-
-
-def get_sort_key(item: Dict[str, Any]):
-    name = clean_channel_name(item.get("name", "")).casefold()
-    v_id = (
-        item.get("ids", {}).get("id", "")
-        if isinstance(item.get("ids"), dict)
-        else ""
-    )
-    return (name, v_id)
-
-
-def main():
-    print(f"Veri çekiliyor: {CATALOG_URL} ...")
-    print(f"Algılanan ve Kullanılacak Aktif Proxy Sayısı: {len(PROXY_LIST)}")
-
-    raw_items = fetch_all()
-
-    print(f"Toplam ham kanal sayısı: {len(raw_items)}")
-
-    items = deduplicate_items(raw_items)
-    if len(raw_items) != len(items):
-        print(f"Mükerrer yayınlar temizlendi. Kalan kanal sayısı: {len(items)}")
-
-    # İsme ve ID'ye göre sıralama
-    items.sort(key=get_sort_key)
-
-    m3u_content = to_m3u(items)
-
-    with open(M3U_FILE, "w", encoding="utf-8") as f:
+    # Çıktıyı nernur.txt dosyasına yaz
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
         f.write(m3u_content)
 
-    print(f"Başarıyla oluşturuldu: {M3U_FILE} ({len(items)} kanal)")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as err:
-        print(f"Kritik Hata: {err}")
-        exit(1)
+    print(f"Başarılı! {len(all_channels)} kanal işlendi ve '{OUTPUT_FILE}' dosyasına kaydedildi.")
