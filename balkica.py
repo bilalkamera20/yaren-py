@@ -302,9 +302,6 @@ def fetch_catalog_group(group, signature):
 # ============================================================
 def build_m3u(channels, proxies):
     out = ["#EXTM3U"]
-    out.append(f"#EXT-X-USER-AGENT:{UA}")
-    out.append("#EXT-X-REFERER:https://vavoo.to/")
-    out.append("#EXT-X-ORIGIN:https://vavoo.to")
 
     proxy_count = len(proxies)
     proxy_index = 0
